@@ -22,7 +22,6 @@ class PolariseSwapper:
         now = datetime.now().astimezone(wib).strftime('%x %X %Z')
         print(f"{Fore.CYAN}[ {now} ]{Style.RESET_ALL} | {color}{message}")
 
-    # ပေးထားသော Screenshot ပါအတိုင်း Header ကို အတိအကျ ပြင်ဆင်ခြင်း
     def get_headers(self, token=None, address=None, sid=None):
         headers = {
             "Accept": "*/*",
@@ -40,7 +39,7 @@ class PolariseSwapper:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         }
         if token and address and sid:
-            # Screenshot အရ format: Bearer <auth_token> <sid> <wallet_address> polarise
+            # Header format based on your network logs: Bearer <auth_token> <sid> <wallet_address> polarise
             headers["Authorization"] = f"Bearer {token} {sid} {address} polarise"
             headers["Accesstoken"] = sid
         return headers
@@ -61,22 +60,14 @@ class PolariseSwapper:
         
         sid = str(uuid.uuid4())
         payload = {
-            "signature": signature,
-            "chain_name": "polarise",
-            "name": address[:6],
-            "nonce": nonce,
-            "wallet": address,
-            "sid": sid,
-            "sub_id": "",
-            "inviter_code": self.REF_CODE
+            "signature": signature, "chain_name": "polarise", "name": address[:6],
+            "nonce": nonce, "wallet": address, "sid": sid, "sub_id": "", "inviter_code": self.REF_CODE
         }
-        
         try:
             async with session.post(f"{self.BASE_API}/profile/login", headers=self.get_headers(), json=payload) as resp:
                 data = await resp.json()
                 if data.get("code") == "200":
-                    token = data["data"]["auth_token_info"]["auth_token"]
-                    return token, sid
+                    return data["data"]["auth_token_info"]["auth_token"], sid
                 return None, None
         except: return None, None
 
@@ -84,62 +75,74 @@ class PolariseSwapper:
         try:
             with open('accounts.txt', 'r') as f:
                 accounts = [line.strip() for line in f if line.strip()]
-        except: return
+        except: 
+            self.log("Error: accounts.txt file not found", Fore.RED)
+            return
 
         async with ClientSession(timeout=ClientTimeout(total=30)) as session:
             for p_key in accounts:
                 try:
                     acc = Account.from_key(p_key)
                     address = acc.address.lower()
-                    self.log(f"စစ်ဆေးနေသည်: {address[:10]}...", Fore.YELLOW)
+                    self.log(f"Checking Account: {address[:10]}...", Fore.YELLOW)
 
                     nonce = await self.get_nonce(session, address)
-                    if not nonce: continue
-
-                    auth_token, sid = await self.login(session, p_key, address, nonce)
-                    if not auth_token:
-                        self.log("Login မရပါ", Fore.RED)
+                    if not nonce: 
+                        self.log("Failed to get Nonce", Fore.RED)
                         continue
 
-                    # Header အသစ်ဖြင့် Profile စစ်ခြင်း
+                    auth_token, sid = await self.login(session, p_key, address, nonce)
+                    if not auth_token: 
+                        self.log("Login failed (401 Unauthorized)", Fore.RED)
+                        continue
+
                     headers = self.get_headers(auth_token, address, sid)
                     async with session.post(f"{self.BASE_API}/profile/profileinfo", headers=headers, json={"chain_name": "polarise"}) as resp:
                         if resp.status == 200:
                             p_data = await resp.json()
                             points = p_data["data"]["exchange_total_points"]
-                            self.log(f"Points: {points}", Fore.CYAN)
+                            self.log(f"Current Points: {points}", Fore.CYAN)
 
                             if points >= 100:
-                                self.log(f"Swap ကြိုးစားနေသည်...", Fore.GREEN)
+                                self.log(f"Point threshold reached (>=100). Attempting Swap...", Fore.GREEN)
                                 msg = f"Nonce to confirm: {nonce}"
                                 signature = to_hex(Account.sign_message(encode_defunct(text=msg), private_key=p_key).signature)
                                 
                                 s_payload = {
-                                    "user_id": p_data["data"]['id'],
-                                    "user_name": p_data["data"]['user_name'],
-                                    "user_wallet": address,
-                                    "used_points": 100,
-                                    "token_symbol": "GRISE",
-                                    "chain_name": "polarise",
-                                    "signature": signature,
-                                    "sign_msg": msg
+                                    "user_id": p_data["data"]['id'], "user_name": p_data["data"]['user_name'],
+                                    "user_wallet": address, "used_points": 100, "token_symbol": "GRISE",
+                                    "chain_name": "polarise", "signature": signature, "sign_msg": msg
                                 }
                                 async with session.post(f"{self.BASE_API}/profile/swappoints", headers=headers, json=s_payload) as s_resp:
                                     s_data = await s_resp.json()
                                     if s_data.get("code") == "200":
-                                        self.log(f"Swap Success! Tx: {s_data['data'].get('tx_hash')}", Fore.GREEN)
+                                        self.log(f"Swap Success! Hash: {s_data['data'].get('tx_hash')}", Fore.GREEN)
                                     else:
-                                        self.log(f"Swap Fail: {s_data.get('msg')}", Fore.RED)
+                                        self.log(f"Swap Failed: {s_data.get('msg')}", Fore.RED)
+                            else:
+                                self.log("Insufficient points for swap.", Fore.LIGHTBLACK_EX)
                         else:
-                            self.log(f"Error {resp.status}", Fore.RED)
+                            self.log(f"Profile Error: Status {resp.status}", Fore.RED)
                 except Exception as e:
-                    self.log(f"Error: {e}", Fore.RED)
-                await asyncio.sleep(1)
+                    self.log(f"Error processing account: {e}", Fore.RED)
+                
+                # Small delay between accounts to prevent rate limiting
+                await asyncio.sleep(2)
 
     async def main(self):
         while True:
+            self.log("=== Starting New Checking Cycle ===", Fore.MAGENTA)
             await self.process_accounts()
-            await asyncio.sleep(5)
+            
+            self.log("=== Cycle Completed. Sleeping for 5 minutes. ===", Fore.MAGENTA)
+            # Countdown Timer for 5 minutes
+            for i in range(300, 0, -1):
+                print(f"{Fore.YELLOW}[ Wait ] Next cycle starts in {i} seconds...", end="\r")
+                await asyncio.sleep(1)
+            print() # Move to new line after countdown
 
 if __name__ == "__main__":
-    asyncio.run(PolariseSwapper().main())
+    try:
+        asyncio.run(PolariseSwapper().main())
+    except KeyboardInterrupt:
+        print(f"\n{Fore.RED}Script terminated by user.")
